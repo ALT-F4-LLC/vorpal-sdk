@@ -41,11 +41,7 @@ pub async fn run(package: &Package) -> Result<(), anyhow::Error> {
 
     let _ = build(source_id, package).await?;
 
-    // TODO: build method
-
-    // TODO status method
-
-    // TODO: retrieve method
+    // TODO: store the package data in store
 
     Ok(())
 }
