@@ -1819,6 +1819,7 @@ dependencies = [
 [[package]]
 name = "vorpal-sdk"
 version = "0.1.0"
+source = "git+https://github.com/ALT-F4-LLC/vorpal-sdk.git?branch=feature/sdk-rust#c5dcd90a080e8abb0aa467908138da42665123b1"
 dependencies = [
  "anyhow",
  "rand",

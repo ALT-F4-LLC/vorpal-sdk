@@ -10,4 +10,4 @@ path = "vorpal.rs"
 [dependencies]
 anyhow = "1.0"
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
-vorpal-sdk = { path = "/Users/erikreinert/Development/repository/github.com/ALT-F4-LLC/vorpal-sdk.git/feature/sdk-rust/rust" }
+vorpal-sdk = { git = "https://github.com/ALT-F4-LLC/vorpal-sdk.git", branch = "feature/sdk-rust" }
