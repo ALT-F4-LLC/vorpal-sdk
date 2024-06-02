@@ -17,7 +17,12 @@
       in {
         packages = {
           sdk-rust = buildRustPackage {
-            cargoSha256 = "sha256-K9yk9ebha0RsNmQdYiOhqdcXs2qtozj+jSu7BPAKQdw=";
+            cargoLock = {
+              lockFile = ./rust/Cargo.lock;
+              outputHashes = {
+                "vorpal-0.1.0" = "sha256-yps0MqnBtA1xF+0ci8V7GDFxvoxfd3ufKMlHkW9bQSM=";
+              };
+            };
             nativeBuildInputs = [protobuf];
             pname = "vorpal-sdk";
             src = ./rust;

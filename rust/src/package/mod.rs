@@ -1,9 +1,12 @@
 use rsa::pss::SigningKey;
 use rsa::sha2::Sha256;
 use rsa::signature::RandomizedSigner;
-use std::fs;
+use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use tokio::fs;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 use vorpal::api::package_service_client::PackageServiceClient;
 use vorpal::api::{BuildRequest, Package, PrepareRequest};
 use vorpal::notary;
@@ -30,23 +33,21 @@ pub fn new(args: PackageArgs) -> Package {
 pub async fn run(package: &Package) -> Result<(), anyhow::Error> {
     let package_dir = store::get_package_path();
     if !package_dir.exists() {
-        fs::create_dir_all(&package_dir)?;
+        fs::create_dir_all(&package_dir).await?;
     }
 
     println!("Preparing: {}", package.name);
 
-    let source_id = prepare(package_dir, package).await?;
+    let (source_id, source_hash) = prepare(package_dir, package).await?;
 
-    println!("Building: {}-{}", package.name, source_id);
+    println!("Building: {}-{}", package.name, source_hash);
 
-    let _ = build(source_id, package).await?;
-
-    // TODO: store the package data in store
+    build(source_id, &source_hash, package).await?;
 
     Ok(())
 }
 
-async fn prepare(package_dir: PathBuf, package: &Package) -> Result<i32, anyhow::Error> {
+async fn prepare(package_dir: PathBuf, package: &Package) -> Result<(i32, String), anyhow::Error> {
     let source = Path::new(&package.source).canonicalize()?;
     let source_ignore_paths = package
         .ignore_paths
@@ -62,7 +63,7 @@ async fn prepare(package_dir: PathBuf, package: &Package) -> Result<i32, anyhow:
     if !source_tar.exists() {
         println!("Creating source tar: {:?}", source_tar);
         store::compress_files(&source, &source_tar, &source_files)?;
-        fs::set_permissions(&source_tar, fs::Permissions::from_mode(0o444))?;
+        fs::set_permissions(&source_tar, Permissions::from_mode(0o444)).await?;
     }
 
     println!("Source file: {}", source_tar.display());
@@ -73,14 +74,14 @@ async fn prepare(package_dir: PathBuf, package: &Package) -> Result<i32, anyhow:
     };
     let signing_key = SigningKey::<Sha256>::new(private_key);
     let mut signing_rng = rand::thread_rng();
-    let source_data = fs::read(&source_tar)?;
+    let source_data = fs::read(&source_tar).await?;
     let source_signature = signing_key.sign_with_rng(&mut signing_rng, &source_data);
 
     println!("Source signature: {}", source_signature.to_string());
 
     let request = tonic::Request::new(PrepareRequest {
         source_data,
-        source_hash,
+        source_hash: source_hash.to_string(),
         source_name: package.name.to_string(),
         source_signature: source_signature.to_string(),
     });
@@ -88,10 +89,14 @@ async fn prepare(package_dir: PathBuf, package: &Package) -> Result<i32, anyhow:
     let response = client.prepare(request).await?;
     let response_data = response.into_inner();
 
-    Ok(response_data.source_id)
+    Ok((response_data.source_id, source_hash))
 }
 
-async fn build(package_id: i32, package: &Package) -> Result<Vec<u8>, anyhow::Error> {
+async fn build(
+    package_id: i32,
+    package_hash: &str,
+    package: &Package,
+) -> Result<(), anyhow::Error> {
     let request = tonic::Request::new(BuildRequest {
         build_phase: package.build_phase.to_string(),
         install_phase: package.install_phase.to_string(),
@@ -101,5 +106,50 @@ async fn build(package_id: i32, package: &Package) -> Result<Vec<u8>, anyhow::Er
     let response = client.build(request).await?;
     let response_data = response.into_inner();
 
-    Ok(response_data.package_data)
+    if response_data.is_compressed {
+        let store_path = store::get_store_path();
+        let store_path_dir_name = store::get_package_dir_name(&package.name, package_hash);
+        let store_path_dir = store_path.join(&store_path_dir_name);
+        let store_path_tar = store_path_dir.with_extension("tar.gz");
+
+        if store_path_dir.exists() {
+            println!("Using existing source: {}", store_path_dir.display());
+            return Ok(());
+        }
+
+        if store_path_tar.exists() {
+            println!("Using existing tar: {}", store_path_tar.display());
+
+            fs::create_dir_all(&store_path_dir).await?;
+            vorpal::store::unpack_source(&store_path_dir, &store_path_tar)?;
+
+            println!("Unpacked source: {}", store_path_dir.display());
+
+            return Ok(());
+        }
+
+        let mut store_tar = File::create(&store_path_tar).await?;
+        match store_tar.write_all(&response_data.package_data).await {
+            Ok(_) => {
+                let metadata = fs::metadata(&store_path_tar).await?;
+                let mut permissions = metadata.permissions();
+
+                permissions.set_mode(0o444);
+                fs::set_permissions(store_path_tar.clone(), permissions).await?;
+
+                let file_name = store_path_tar.file_name().unwrap();
+                println!("Stored tar: {}", file_name.to_string_lossy());
+            }
+            Err(e) => eprintln!("Failed source file: {}", e),
+        }
+
+        println!("Stored tar: {}", store_path_tar.display());
+
+        fs::create_dir_all(&store_path_dir).await?;
+        vorpal::store::unpack_source(&store_path_dir, &store_path_tar)?;
+
+        println!("Unpacked source: {}", store_path_dir.display());
+    }
+
+    Ok(())
 }
