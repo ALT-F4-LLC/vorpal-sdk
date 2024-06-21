@@ -30,7 +30,6 @@ jobs:
     strategy:
       matrix:
         profile:
-          - example-rust
           - sdk-rust
     steps:
       - uses: cachix/install-nix-action@v26

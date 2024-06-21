@@ -12,32 +12,20 @@
         pkgs,
         ...
       }: let
-        inherit (pkgs) grpcurl just protobuf rustPlatform;
+        inherit (pkgs) darwin grpcurl just lib openssl pkg-config protobuf rustPlatform;
+        inherit (darwin.apple_sdk.frameworks) CoreServices SystemConfiguration Security;
         inherit (rustPlatform) buildRustPackage;
       in {
         packages = {
-          example-rust = buildRustPackage {
-            cargoLock = {
-              lockFile = ./example/rust/Cargo.lock;
-              outputHashes = {
-                "vorpal-0.1.0" = "sha256-yps0MqnBtA1xF+0ci8V7GDFxvoxfd3ufKMlHkW9bQSM=";
-                "vorpal-sdk-0.1.0" = "sha256-U/8lEM2B7MGCckams+uz0uozv4Yq499gVoaIAK8jV7o=";
-              };
-            };
-            nativeBuildInputs = [protobuf];
-            pname = "example-rust";
-            src = ./example/rust;
-            version = "0.1.0";
-          };
-
           sdk-rust = buildRustPackage {
+            buildInputs = [openssl] ++ lib.optionals pkgs.stdenv.isDarwin [CoreServices SystemConfiguration Security];
             cargoLock = {
               lockFile = ./rust/Cargo.lock;
               outputHashes = {
-                "vorpal-0.1.0" = "sha256-yps0MqnBtA1xF+0ci8V7GDFxvoxfd3ufKMlHkW9bQSM=";
+                "vorpal-0.1.0" = "sha256-j1pTEN15Mx/9nAC75GAPRJvaoAW8qbped7aJ88qKUKc=";
               };
             };
-            nativeBuildInputs = [protobuf];
+            nativeBuildInputs = [pkg-config protobuf];
             pname = "vorpal-sdk";
             src = ./rust;
             version = "0.1.0";

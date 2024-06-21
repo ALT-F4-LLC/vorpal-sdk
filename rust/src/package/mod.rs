@@ -1,155 +1,224 @@
-use rsa::pss::SigningKey;
-use rsa::sha2::Sha256;
-use rsa::signature::RandomizedSigner;
-use std::fs::Permissions;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use tokio::fs;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
-use vorpal::api::package_service_client::PackageServiceClient;
-use vorpal::api::{BuildRequest, Package, PrepareRequest};
-use vorpal::notary;
-use vorpal::store;
+use log::{info, trace};
+use std::collections::HashMap;
+use std::env;
+use tokio_stream::StreamExt;
+use tonic::transport::Channel;
+use vorpal::api::config_service_client::ConfigServiceClient;
+use vorpal::api::{
+    ConfigPackageBuild, ConfigPackageOutput, ConfigPackageRequest, ConfigPackageSource,
+    ConfigPackageSourceKind,
+};
 
-pub struct PackageArgs<'a> {
-    pub build_phase: &'a str,
-    pub ignore_paths: Vec<&'a str>,
-    pub install_phase: &'a str,
-    pub name: &'a str,
-    pub source: &'a str,
+mod package_sandbox;
+
+pub struct Agent {
+    pub config_host: String,
 }
 
-pub fn new(args: PackageArgs) -> Package {
-    Package {
-        build_phase: args.build_phase.to_string(),
-        ignore_paths: args.ignore_paths.iter().map(|i| i.to_string()).collect(),
-        install_phase: args.install_phase.to_string(),
-        name: args.name.to_string(),
-        source: args.source.to_string(),
-    }
-}
-
-pub async fn run(package: &Package) -> Result<(), anyhow::Error> {
-    let package_dir = store::get_package_path();
-    if !package_dir.exists() {
-        fs::create_dir_all(&package_dir).await?;
-    }
-
-    println!("Preparing: {}", package.name);
-
-    let (source_id, source_hash) = prepare(package_dir, package).await?;
-
-    println!("Building: {}-{}", package.name, source_hash);
-
-    build(source_id, &source_hash, package).await?;
-
-    Ok(())
-}
-
-async fn prepare(package_dir: PathBuf, package: &Package) -> Result<(i32, String), anyhow::Error> {
-    let source = Path::new(&package.source).canonicalize()?;
-    let source_ignore_paths = package
-        .ignore_paths
-        .iter()
-        .map(|i| Path::new(i).to_path_buf())
-        .collect::<Vec<PathBuf>>();
-    let source_files = store::get_file_paths(&source, &source_ignore_paths)?;
-    let source_files_hashes = store::get_file_hashes(&source_files)?;
-    let source_hash = store::get_source_hash(&source_files_hashes)?;
-    let source_dir_name = store::get_package_dir_name(&package.name, &source_hash);
-    let source_dir = package_dir.join(&source_dir_name).with_extension("source");
-    let source_tar = source_dir.with_extension("source.tar.gz");
-    if !source_tar.exists() {
-        println!("Creating source tar: {:?}", source_tar);
-        store::compress_files(&source, &source_tar, &source_files)?;
-        fs::set_permissions(&source_tar, Permissions::from_mode(0o444)).await?;
-    }
-
-    println!("Source file: {}", source_tar.display());
-
-    let private_key = match notary::get_private_key().await {
-        Ok(key) => key,
-        Err(e) => anyhow::bail!("Failed to get private key: {:?}", e),
-    };
-    let signing_key = SigningKey::<Sha256>::new(private_key);
-    let mut signing_rng = rand::thread_rng();
-    let source_data = fs::read(&source_tar).await?;
-    let source_signature = signing_key.sign_with_rng(&mut signing_rng, &source_data);
-
-    println!("Source signature: {}", source_signature.to_string());
-
-    let request = tonic::Request::new(PrepareRequest {
-        source_data,
-        source_hash: source_hash.to_string(),
-        source_name: package.name.to_string(),
-        source_signature: source_signature.to_string(),
-    });
-    let mut client = PackageServiceClient::connect("http://[::1]:15323").await?;
-    let response = client.prepare(request).await?;
-    let response_data = response.into_inner();
-
-    Ok((response_data.source_id, source_hash))
-}
-
-async fn build(
-    package_id: i32,
-    package_hash: &str,
-    package: &Package,
-) -> Result<(), anyhow::Error> {
-    let request = tonic::Request::new(BuildRequest {
-        build_phase: package.build_phase.to_string(),
-        install_phase: package.install_phase.to_string(),
-        source_id: package_id,
-    });
-    let mut client = PackageServiceClient::connect("http://[::1]:15323").await?;
-    let response = client.build(request).await?;
-    let response_data = response.into_inner();
-
-    if response_data.is_compressed {
-        let store_path = store::get_store_path();
-        let store_path_dir_name = store::get_package_dir_name(&package.name, package_hash);
-        let store_path_dir = store_path.join(&store_path_dir_name);
-        let store_path_tar = store_path_dir.with_extension("tar.gz");
-
-        if store_path_dir.exists() {
-            println!("Using existing source: {}", store_path_dir.display());
-            return Ok(());
+impl Agent {
+    pub fn new() -> Agent {
+        Agent {
+            config_host: "http://[::1]:15323".to_string(),
         }
+    }
 
-        if store_path_tar.exists() {
-            println!("Using existing tar: {}", store_path_tar.display());
+    pub async fn with_config_host(mut self: Agent, host: &str) -> Agent {
+        self.config_host = host.to_string();
+        self
+    }
 
-            fs::create_dir_all(&store_path_dir).await?;
-            vorpal::store::unpack_source(&store_path_dir, &store_path_tar)?;
+    pub async fn connect(self) -> Result<ConfigServiceClient<Channel>, anyhow::Error> {
+        Ok(ConfigServiceClient::connect(self.config_host.clone()).await?)
+    }
+}
 
-            println!("Unpacked source: {}", store_path_dir.display());
+pub struct PackageBuild {
+    pub environment: HashMap<String, String>,
+    pub packages: Vec<ConfigPackageOutput>,
+    pub sandbox: Option<bool>,
+    pub script: String,
+}
 
-            return Ok(());
+pub struct PackageSource {
+    pub kind: ConfigPackageSourceKind,
+    pub hash: Option<String>,
+    pub ignore_paths: Vec<String>,
+    pub uri: String,
+}
+
+pub struct Package {
+    pub agent: Agent,
+    pub build: PackageBuild,
+    pub name: String,
+    pub source: PackageSource,
+}
+
+pub enum PackageSourceKind {
+    Local,
+    Http,
+    Git,
+}
+
+impl Package {
+    pub fn new(name: &str, build_script: &str, source_uri: &str) -> Package {
+        let agent = Agent::new();
+
+        Package {
+            agent,
+            build: PackageBuild {
+                environment: HashMap::new(),
+                sandbox: Some(true),
+                packages: vec![],
+                script: build_script.to_string(),
+            },
+            name: name.to_string(),
+            source: PackageSource {
+                hash: None,
+                ignore_paths: vec![],
+                kind: ConfigPackageSourceKind::Local,
+                uri: source_uri.to_string(),
+            },
         }
+    }
 
-        let mut store_tar = File::create(&store_path_tar).await?;
-        match store_tar.write_all(&response_data.package_data).await {
-            Ok(_) => {
-                let metadata = fs::metadata(&store_path_tar).await?;
-                let mut permissions = metadata.permissions();
+    pub fn with_agent(mut self: Package, agent: Agent) -> Package {
+        self.agent = agent;
+        self
+    }
 
-                permissions.set_mode(0o444);
-                fs::set_permissions(store_path_tar.clone(), permissions).await?;
+    pub fn with_build_environment(mut self: Package, key: &str, value: &str) -> Package {
+        self.build
+            .environment
+            .insert(key.to_string(), value.to_string());
+        self
+    }
 
-                let file_name = store_path_tar.file_name().unwrap();
-                println!("Stored tar: {}", file_name.to_string_lossy());
+    pub fn with_build_packages(mut self: Package, packages: Vec<ConfigPackageOutput>) -> Package {
+        for p in packages {
+            self.build.packages.push(p);
+        }
+        self
+    }
+
+    pub fn with_build_sandbox(mut self: Package, sandbox: bool) -> Package {
+        self.build.sandbox = Some(sandbox);
+        self
+    }
+
+    pub fn with_source_hash(mut self: Package, hash: &str) -> Package {
+        self.source.hash = Some(hash.to_string());
+        self
+    }
+
+    pub fn with_source_kind(mut self: Package, kind: PackageSourceKind) -> Package {
+        self.source.kind = match kind {
+            PackageSourceKind::Git => ConfigPackageSourceKind::Git,
+            PackageSourceKind::Http => ConfigPackageSourceKind::Http,
+            PackageSourceKind::Local => ConfigPackageSourceKind::Local,
+        };
+        self
+    }
+
+    pub fn with_source_ignore_paths(mut self: Package, paths: Vec<String>) -> Package {
+        self.source.ignore_paths = paths;
+        self
+    }
+
+    pub async fn package(self: Package) -> Result<ConfigPackageOutput, anyhow::Error> {
+        trace!("package");
+
+        let mut client = self.agent.connect().await?;
+
+        let mut build_packages = vec![];
+
+        match env::consts::OS {
+            "linux" => {
+                let gmp = package_stream(&mut client, package_sandbox::gmp()).await?;
+                let sed = package_stream(&mut client, package_sandbox::sed()).await?;
+                let isl = package_stream(&mut client, package_sandbox::isl(&gmp)).await?;
+                let mpfr = package_stream(&mut client, package_sandbox::mpfr(&gmp)).await?;
+                let mpc = package_stream(&mut client, package_sandbox::mpc(&gmp, &mpfr)).await?;
+                let gcc =
+                    package_stream(&mut client, package_sandbox::gcc(&gmp, &isl, &mpfr, &mpc))
+                        .await?;
+                let coreutils =
+                    package_stream(&mut client, package_sandbox::coreutils(&sed)).await?;
+
+                build_packages.push(gmp);
+                build_packages.push(isl);
+                build_packages.push(mpfr);
+                build_packages.push(mpc);
+                build_packages.push(gcc);
+                build_packages.push(sed);
+                build_packages.push(coreutils);
             }
-            Err(e) => eprintln!("Failed source file: {}", e),
+            "macos" => {}
+            _ => {}
         }
 
-        println!("Stored tar: {}", store_path_tar.display());
+        for p in self.build.packages {
+            build_packages.push(p);
+        }
 
-        fs::create_dir_all(&store_path_dir).await?;
-        vorpal::store::unpack_source(&store_path_dir, &store_path_tar)?;
+        info!("package build packages: {:?}", build_packages);
 
-        println!("Unpacked source: {}", store_path_dir.display());
+        let config = ConfigPackageRequest {
+            build: Some(ConfigPackageBuild {
+                environment: self.build.environment,
+                packages: build_packages,
+                sandbox: self.build.sandbox.unwrap(),
+                script: self.build.script,
+            }),
+            name: self.name,
+            source: Some(ConfigPackageSource {
+                hash: self.source.hash,
+                ignore_paths: self.source.ignore_paths,
+                kind: self.source.kind.into(),
+                uri: self.source.uri,
+            }),
+        };
+
+        package_stream(&mut client, config).await
+    }
+}
+
+async fn package_stream(
+    client: &mut ConfigServiceClient<Channel>,
+    config: ConfigPackageRequest,
+) -> Result<ConfigPackageOutput, anyhow::Error> {
+    let package_response = client.package(config).await?;
+    let mut package_hash = "".to_string();
+    let mut package_name = "".to_string();
+    let mut package_stream = package_response.into_inner();
+
+    while let Some(response) = package_stream.next().await {
+        if let Err(e) = response {
+            return Err(anyhow::anyhow!("gRPC error: {:?}", e));
+        }
+
+        let res = response.unwrap();
+
+        if !res.log_output.is_empty() {
+            let log_output = String::from_utf8_lossy(&res.log_output).into_owned();
+            info!("{}", log_output);
+        }
+
+        if let Some(output) = res.package_output {
+            package_hash = output.hash;
+            package_name = output.name;
+        }
     }
 
-    Ok(())
+    if package_hash.is_empty() {
+        return Err(anyhow::anyhow!("No package hash returned"));
+    }
+
+    if package_name.is_empty() {
+        return Err(anyhow::anyhow!("No package name returned"));
+    }
+
+    Ok(ConfigPackageOutput {
+        hash: package_hash,
+        name: package_name,
+    })
 }

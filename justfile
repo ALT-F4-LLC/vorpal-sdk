@@ -1,7 +1,7 @@
 _default:
     just --list
 
-build profile="default":
+package profile:
     nix build \
         --json \
         --no-link \

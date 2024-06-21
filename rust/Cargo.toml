@@ -3,10 +3,15 @@ name = "vorpal-sdk"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "vorpal"
+path = "vorpal.rs"
+
 [dependencies]
-anyhow = "1.0"
-rand = "0.8"
-rsa = { version = "0.9", features = ["sha2"] }
-tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
-tonic = "0.11"
-vorpal = { git = "https://github.com/ALT-F4-LLC/vorpal.git" }
+anyhow = "1"
+env_logger = "0"
+log = "0"
+tokio = "1"
+tokio-stream = "0"
+tonic = "0"
+vorpal = { branch = "main", git = "https://github.com/ALT-F4-LLC/vorpal.git" }
