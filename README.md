@@ -31,7 +31,7 @@ pub async fn main() -> Result<(), anyhow::Error> {
         "example",
 
         // build script
-        "echo "Hello, World!" >> $output/example.txt",
+        "echo \"Hello, World!\" >> $output/example.txt",
 
         // source path
         &env::current_dir()?.to_string_lossy().to_string(),
