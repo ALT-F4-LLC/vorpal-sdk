@@ -4,9 +4,9 @@ Supported language SDKs for Vorpal.
 
 ## Overview
 
-The `vorpal-sdk` is a toolkit designed to facilitate the creation of packages in various programming languages. Currently, the SDK supports Rust, with plans to extend support to Go, TypeScript and more in the near future. It provides a simple interface for defining a package, including its name, build script, and source path. This is done through the `Package::new` function, which accepts these three parameters. The package can then be built async using the `.package()` method.
+The `vorpal-sdk` is a toolkit designed to facilitate the creation of packages in various programming languages. Currently, the SDK supports Rust, with plans to extend support to Go, TypeScript and more in the near future. It provides a simple interface for defining a package, including its name, build script, and source path.
 
-In addition to the basic package definition, the SDK also allows for more complex configurations using included builder methods. For example, it's possible to specify additional build packages, the kind of source (e.g., HTTP), a source hash for verification purposes and much more.
+In addition to the basic package definition, the SDK allows for more complex configurations using builder methods. For example, it's possible to specify additional build packages, the kind of source (e.g., HTTP), a source hash for verification purposes and much more.
 
 ## Packages
 
